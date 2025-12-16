@@ -1,26 +1,59 @@
 import datetime
-import pyttsx3
 import webbrowser
 import ollama
-import os 
+import os
+import json
+import re 
 import requests
 import speech_recognition as sr
 import subprocess
+import asyncio
+import edge_tts
+import uuid
+from playsound import playsound
+from connection_manager import manager
+
+async def broadcast_status(status, data=None):
+    await manager.broadcast({"status": status, "data": data})
 
 def speak(text):
-    engine = pyttsx3.init()
-    voices = engine.getProperty('voices')
-    engine.setProperty('voice', voices[1].id)
-    engine.say(text)
-    engine.runAndWait()
+    async def _speak():
+        filename = f"temp_voice_{uuid.uuid4()}.mp3"
+        await manager.broadcast({"status": "speaking", "text": text})
+        
+        try:
+            communicate = edge_tts.Communicate(
+                text=text,
+                voice="en-US-JennyNeural",
+                rate="+5%",
+                pitch="-2Hz"
+            )
+            await communicate.save(filename)
+            
+            playsound(filename)
+            
+        except Exception as e:
+            print(f"Speech error: {e}")
+        finally:
+            # Clean up temporary file
+            try:
+                if os.path.exists(filename):
+                    os.remove(filename)
+            except Exception:
+                pass
+        await manager.broadcast({"status": "idle"})
+    
+    asyncio.run(_speak())
 
 def take_command():
     r = sr.Recognizer()
-    r.pause_threshold = 2.0
+    r.pause_threshold = 1.5
     with sr.Microphone() as src:
         r.adjust_for_ambient_noise(src, duration=0.5)
         print("Say something")
+        manager.broadcast_sync({"status": "listening"})
         audio = r.listen(src)
+        manager.broadcast_sync({"status": "processing"})
     try:
         print("Recognizing.....")
         rec = r.recognize_google(audio)
@@ -47,12 +80,105 @@ def auto_greeting(name="user"):
         greet = f"Good afternoon, {name}!"
     elif 18 <= hour < 22:
         greet = f"Good Evening, {name}!"
+    elif 22 <= hour or hour < 4:
+        greet = f"It's so late at this hour, are you okay {name}?"
     else:
-        greet = f"Hello {name} how can I help you at this hour?"
+        greet = f"It's so early at this hour, {name}."
 
     print(greet)
     speak(greet)
-    speak("I'm your AI assistant. What can I do for you today")
+    speak(f" Okay {name} I'm your AI assistant. What can I do for you today")
+
+
+def get_user_name():
+    """Get username from storage or ask for it with validation"""
+    data_file = "user_data.json"
+    
+    # Check if we already have the name stored
+    if os.path.exists(data_file):
+        try:
+            with open(data_file, "r") as f:
+                data = json.load(f)
+                name = data.get("name", "")
+                if name and len(name) > 1:
+                    return name
+        except:
+            pass
+    
+    # Common words that are NOT names
+    invalid_words = {
+        "is", "my", "name", "the", "a", "an", "and", "or", "but", "in", "on", "at",
+        "to", "for", "of", "with", "by", "from", "where", "what", "when", "who",
+        "am", "are", "me", "you", "call", "this", "that", "it", "its", "hey", "hi"
+    }
+    
+    
+    for attempt in range(3):
+        if attempt == 0:
+            speak("Hello there! My name is Vaeryn. What's your name?")
+        else:
+            speak("Sorry, I didn't catch that. What's your name?")
+        
+        rec = take_command()
+        
+        if not rec:
+            continue
+        
+        rec_lower = rec.lower().strip()
+        
+        
+        name = None
+        patterns = [
+            r"my name is (\w+)",
+            r"i am (\w+)",
+            r"i'm (\w+)",
+            r"call me (\w+)",
+            r"this is (\w+)",
+            r"name is (\w+)",
+            r"it's (\w+)",
+            r"its (\w+)"
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, rec_lower)
+            if match:
+                name = match.group(1)
+                break
+    
+        if not name:
+            words = rec_lower.split()
+            for word in reversed(words):
+                if word not in invalid_words and len(word) > 1 and word.isalpha():
+                    name = word
+                    break
+        
+        # Validate the name
+        if name and len(name) > 1 and name.lower() not in invalid_words and name.isalpha():
+            name = name.title()
+            speak(f"Nice to meet you, {name}!")
+            
+            # Save name
+            try:
+                with open(data_file, "w") as f:
+                    json.dump({"name": name}, f)
+            except Exception as e:
+                print(f"Could not save user data: {e}")
+            
+            return name
+    
+    # Fallback to typed input
+    speak("I'm having trouble hearing you. Please type your name.")
+    name = input("Enter your name: ").strip().title()
+    
+    if name:
+        try:
+            with open(data_file, "w") as f:
+                json.dump({"name": name}, f)
+        except:
+            pass
+        return name
+    
+    return "User"
 
 def ask_ollama(question):
     try:
@@ -64,7 +190,7 @@ def ask_ollama(question):
             "Always respond in short one or two short sentences"
             "Never include Asterisks (*) or markdown, or formatting when you respond. "
             "If user asks a complex question answer shortly first then, ask if they need a longer answer."
-            "If someone asks you who created you answer should be: Aryy is my creator he is a sopohomore at Luther College Decorah Iowa " ),
+            "If someone asks you who created you answer should be: Aryy is my creator he is a sophomore at Luther College Decorah Iowa " ),
         },
         {"role": "user", "content": question},
     ])
