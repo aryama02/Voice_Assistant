@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+ollama
+requests
+SpeechRecognition
+edge-tts
+playsound==1.2.2
+PyAudio
